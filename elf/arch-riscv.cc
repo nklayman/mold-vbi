@@ -69,8 +69,10 @@
 
 #include "mold.h"
 
+#include <iostream>
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_for_each.h>
+#include <vector>
 
 namespace mold::elf {
 
@@ -296,6 +298,7 @@ void EhFrameSection<E>::apply_reloc(Context<E> &ctx, const ElfRel<E> &rel,
 template <typename E>
 void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
   std::span<const ElfRel<E>> rels = get_rels(ctx);
+  std::vector<ul32> overflows{};
 
   ElfRel<E> *dynrel = nullptr;
   if (ctx.reldyn)
@@ -379,7 +382,17 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
       break;
     }
     case R_RISCV_GOT_HI20:
-      *(ul32 *)loc = G + GOT + A - P;
+      {
+        i64 val = G + GOT + A - P;
+        printf("R_RISCV_GOT_HI20: %lx\n", val);
+        printf("Components: g=%lx, GOT=%lx, a=%lx, p=%lx\n", G, GOT, A, P);
+        if (val < 0) {
+          overflows.push_back(0);
+        } else {
+          overflows.push_back((val + (1 << 27)) >> 32);
+        }
+      *(ul32 *)loc = val;
+      }
       break;
     case R_RISCV_TLS_GOT_HI20:
       *(ul32 *)loc = sym.get_gottp_addr(ctx) + A - P;
@@ -394,7 +407,15 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
         // help debugging of a faulty program.
         *(ul32 *)loc = 0;
       } else {
-        *(ul32 *)loc = S + A - P;
+        i64 val = S + A - P;
+        printf("R_RISCV_PCREL_HI20: %lx\n", val);
+        printf("Components: s=%lx, a=%lx, p=%lx\n", S, A, P);
+        if (val < 0) {
+          overflows.push_back(0);
+        } else {
+          overflows.push_back((val + (1 << 27)) >> 32);
+        }
+        *(ul32 *)loc = val;
       }
       break;
     case R_RISCV_HI20: {
@@ -552,6 +573,7 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
   }
 
   // Restore the original instructions pcrel HI20 relocations overwrote.
+  uint32_t count = 0;
   for (i64 i = 0; i < rels.size(); i++) {
     switch (rels[i].r_type) {
     case R_RISCV_GOT_HI20:
@@ -560,8 +582,24 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
     case R_RISCV_TLS_GD_HI20: {
       u8 *loc = base + rels[i].r_offset - get_r_delta(i);
       u32 val = *(ul32 *)loc;
-      *(ul32 *)loc = *(ul32 *)(contents.data() + rels[i].r_offset);
-      write_utype(loc, val);
+      ul32 instruction = *(ul32 *)(contents.data() + rels[i].r_offset);
+      if (overflows[count]) {
+        printf("warning: relocation %d overflows at offset %d   overflow: %d     existing val: %d\n", rels[i].r_type, rels[i].r_offset, overflows[count], (i32) val);
+
+        // TODO: this should be able to be (1 << 28) I think, but tying to be safe for now
+        assert((i32) val >= -(1 << 20) && (1 << 20) > (i32) val);
+        assert((i32) overflows[count] >= -8 && (i32) overflows[count] < 8);
+        u32 instruction_mask = 0b11111'1111111;
+        // Use overflows as top 4 bits, existing val as rest of u-type
+        val = ((overflows[count] << 28) | (utype(val) & 0x0f'ff'ff'ff)) & ~instruction_mask;
+        printf("new val: %lx\n", val);
+        *(ul32 *)loc = ((instruction ^ 0b11100) & instruction_mask) | val;
+      } else {
+        *(ul32 *)loc = instruction;
+        write_utype(loc, val);
+      }
+      printf("result: %lx\n", *(ul32 *)loc);
+      count++;
     }
     }
   }

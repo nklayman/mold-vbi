@@ -1447,13 +1447,15 @@ i64 do_set_osec_offsets(Context<E> &ctx) {
   while (i < chunks.size() && (chunks[i]->shdr.sh_flags & SHF_ALLOC)) {
     Chunk<E> &first = *chunks[i];
     assert(first.shdr.sh_type != SHT_NOBITS);
-    fileoff = align_to(fileoff, alignment(&first));
+    fileoff = align_to(fileoff, std::max<u64>(alignment(&first), 4096));
 
     // Assign ALLOC sections contiguous file offsets as long as they
     // are contiguous in memory.
+    uint64_t prev_end = first.shdr.sh_addr;
     for (;;) {
       chunks[i]->shdr.sh_offset =
-        fileoff + chunks[i]->shdr.sh_addr - first.shdr.sh_addr;
+        fileoff + prev_end;
+      prev_end += chunks[i]->shdr.sh_size;
       i++;
 
       if (i >= chunks.size() ||
@@ -1475,7 +1477,6 @@ i64 do_set_osec_offsets(Context<E> &ctx) {
       if (gap_size >= ctx.page_size)
         break;
     }
-
     fileoff = chunks[i - 1]->shdr.sh_offset + chunks[i - 1]->shdr.sh_size;
 
     while (i < chunks.size() &&
@@ -1486,7 +1487,7 @@ i64 do_set_osec_offsets(Context<E> &ctx) {
 
   // Assign file offsets to non-memory-allocated sections.
   for (; i < chunks.size(); i++) {
-    fileoff = align_to(fileoff, chunks[i]->shdr.sh_addralign);
+    fileoff = align_to(fileoff, std::max<u64>(chunks[i]->shdr.sh_addralign, 4096));
     chunks[i]->shdr.sh_offset = fileoff;
     fileoff += chunks[i]->shdr.sh_size;
   }
